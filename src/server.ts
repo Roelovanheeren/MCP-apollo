@@ -19,9 +19,20 @@ app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   const authHeader = req.headers.authorization || "";
   const apiKeyHeader = (req.headers["x-api-key"] as string | undefined) || "";
-  const tokenCandidate = authHeader.startsWith("Bearer ")
-    ? authHeader.slice("Bearer ".length).trim()
-    : authHeader.trim();
+  const prefixes = ["Bearer ", "Token ", "Apikey ", "Api-Key "];
+  let tokenCandidate = authHeader.trim();
+  for (const prefix of prefixes) {
+    if (tokenCandidate.startsWith(prefix)) {
+      tokenCandidate = tokenCandidate.slice(prefix.length).trim();
+      break;
+    }
+  }
+
+  if (!tokenCandidate && authHeader.includes(" ")) {
+    const parts = authHeader.split(/\s+/);
+    tokenCandidate = parts[parts.length - 1]?.trim() || "";
+  }
+
   const provided =
     tokenCandidate ||
     apiKeyHeader.trim() ||
@@ -116,7 +127,7 @@ function simplifyPerson(p: any) {
 /** ---------- Tools ---------- */
 
 // 1) List tools for AgentKit
-app.post("/tools/list", (_req, res) => {
+const listTools = (_req: express.Request, res: express.Response) => {
   res.json({
     ok: true,
     tools: [
@@ -132,7 +143,10 @@ app.post("/tools/list", (_req, res) => {
       }
     ]
   });
-});
+};
+
+app.post("/tools/list", listTools);
+app.get("/tools/list", listTools);
 
 // 2) Invoke a tool
 app.post("/tools/call", async (req, res) => {
