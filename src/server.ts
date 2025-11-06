@@ -48,6 +48,21 @@ app.use((req, res, next) => {
 // Health
 app.get("/health", (_req, res) => res.json({ ok: true, service: "apollo-mcp" }));
 
+// Root metadata so clients probing '/' don't get 404
+const meta = {
+  ok: true,
+  service: "apollo-mcp",
+  status: "ready",
+  endpoints: {
+    health: "/health",
+    listTools: "/tools/list",
+    callTool: "/tools/call"
+  }
+};
+
+app.get("/", (_req, res) => res.json(meta));
+app.post("/", (_req, res) => res.json(meta));
+
 /** ---------- Tool schemas ---------- */
 const SearchInput = z.object({
   // loose free text
