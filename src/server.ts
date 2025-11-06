@@ -102,6 +102,51 @@ const EnrichInputDescription = {
   required: "one of email, linkedin_url, or apollo_person_id must be provided"
 };
 
+const SearchInputSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    query: { type: "string", description: "Free text keywords" },
+    title: { type: "string", description: "Job title filter" },
+    company: { type: "string", description: "Company/organization name" },
+    location: { type: "string", description: "Geo filter (city/state/country)" },
+    seniority_levels: {
+      type: "array",
+      description: "Apollo seniority codes e.g. ['cxo','vp']",
+      items: { type: "string" }
+    },
+    page: {
+      type: "integer",
+      minimum: 1,
+      default: 1,
+      description: "Page number (1-indexed)"
+    },
+    per_page: {
+      type: "integer",
+      minimum: 1,
+      maximum: 200,
+      default: 25,
+      description: "Results per page"
+    }
+  }
+};
+
+const EnrichInputSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    email: { type: "string", format: "email", description: "Person email" },
+    linkedin_url: { type: "string", format: "uri", description: "LinkedIn profile URL" },
+    apollo_person_id: { type: "string", description: "Apollo person id" }
+  },
+  anyOf: [
+    { required: ["email"] },
+    { required: ["linkedin_url"] },
+    { required: ["apollo_person_id"] }
+  ],
+  description: "Provide email, linkedin_url, or apollo_person_id"
+};
+
 /** ---------- Apollo helpers ---------- */
 const APOLLO = "https://api.apollo.io/v1";
 
@@ -145,16 +190,20 @@ function simplifyPerson(p: any) {
 const listTools = (_req: express.Request, res: express.Response) => {
   res.json({
     ok: true,
+    service: "apollo-mcp",
+    version: "1.0.0",
     tools: [
       {
         name: "apollo_search",
         description: "Search contacts in Apollo (people.search) with pagination.",
-        parameters: SearchInputDescription
+        parameters: SearchInputDescription,
+        input_schema: SearchInputSchema
       },
       {
         name: "apollo_enrich",
         description: "Enrich a person by email / LinkedIn / Apollo ID (people.enrich).",
-        parameters: EnrichInputDescription
+        parameters: EnrichInputDescription,
+        input_schema: EnrichInputSchema
       }
     ]
   });
@@ -212,4 +261,8 @@ app.post("/tools/call", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`apollo-mcp listening on :${PORT}`);
+});
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
 });
