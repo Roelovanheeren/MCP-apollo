@@ -12,28 +12,42 @@ if (!APOLLO_API_KEY || !MCP_AUTH_TOKEN) {
   process.exit(1);
 }
 
+const PROTOCOL_VERSION = "2025-06-18";
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use((req, _res, next) => {
-  const authPreview =
+  const auth =
     (req.headers.authorization as string | undefined) ||
     (req.headers["x-api-key"] as string | undefined) ||
     (req.query.access_token as string | undefined) ||
     "";
-  let bodyPreview = "";
+  let bodyPreview = "<empty>";
   try {
-    bodyPreview =
-      typeof req.body === "string"
-        ? req.body.slice(0, 160)
-        : JSON.stringify(req.body).slice(0, 160);
+    if (typeof req.body === "string") {
+      bodyPreview = req.body.slice(0, 160);
+    } else if (req.body && typeof req.body === "object") {
+      const clone: Record<string, unknown> = { ...req.body };
+      if (clone.params && typeof clone.params === "object") {
+        clone.params = { ...(clone.params as Record<string, unknown>) };
+        if ("apiKey" in (clone.params as Record<string, unknown>)) {
+          (clone.params as Record<string, unknown>).apiKey = "***";
+        }
+      }
+      bodyPreview = JSON.stringify(clone).slice(0, 200);
+    }
   } catch {
     bodyPreview = "[unserializable]";
   }
+  const method =
+    req.body && typeof req.body === "object" && "method" in req.body
+      ? ` (${String((req.body as Record<string, unknown>).method)})`
+      : "";
   console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.path} auth-preview=${
-      authPreview ? "***" : "none"
-    } body=${bodyPreview || "<empty>"}`
+    `[${new Date().toISOString()}] ${req.method} ${req.path}${method} auth=${
+      auth ? "***" : "none"
+    } body=${bodyPreview}`
   );
   next();
 });
@@ -76,15 +90,19 @@ const meta = {
   ok: true,
   service: "apollo-mcp",
   status: "ready",
+  protocol: {
+    name: "http+json",
+    version: PROTOCOL_VERSION
+  },
   endpoints: {
     health: "/health",
     listTools: "/tools/list",
-    callTool: "/tools/call"
+    callTool: "/tools/call",
+    rpc: "/"
   }
 };
 
 app.get("/", (_req, res) => res.json(meta));
-app.post("/", (_req, res) => res.json(meta));
 
 /** ---------- Tool schemas ---------- */
 const SearchInput = z.object({
@@ -170,6 +188,74 @@ const EnrichInputSchema = {
   description: "Provide email, linkedin_url, or apollo_person_id"
 };
 
+type SearchInputType = z.infer<typeof SearchInput>;
+type EnrichInputType = z.infer<typeof EnrichInput>;
+
+async function runApolloSearch(input: SearchInputType) {
+  const payload: Record<string, unknown> = {
+    q_keywords: input.query,
+    title: input.title,
+    organization_name: input.company,
+    location: input.location,
+    seniority_levels: input.seniority_levels,
+    page: input.page,
+    per_page: input.per_page
+  };
+
+  const data = await apolloPost("/people/search", payload);
+  const list = (data.people || data.contacts || []).map(simplifyPerson);
+  const paging = data.pagination || {
+    page: input.page,
+    per_page: input.per_page,
+    total_entries: data.total || list.length
+  };
+
+  return { count: list.length, paging, contacts: list };
+}
+
+async function runApolloEnrich(input: EnrichInputType) {
+  const payload: Record<string, unknown> = {};
+  if (input.email) payload.email = input.email;
+  if (input.linkedin_url) payload.linkedin_url = input.linkedin_url;
+  if (input.apollo_person_id) payload.id = input.apollo_person_id;
+
+  const data = await apolloPost("/people/enrich", payload);
+  const person = data.person || data;
+  return { contact: simplifyPerson(person), raw: data };
+}
+
+interface ToolDefinition<T> {
+  name: string;
+  description: string;
+  summary: Record<string, string>;
+  schema: Record<string, unknown>;
+  parse: (value: unknown) => T;
+  run: (input: T) => Promise<unknown>;
+}
+
+const TOOL_DEFINITIONS: ToolDefinition<unknown>[] = [
+  {
+    name: "apollo_search",
+    description: "Search contacts in Apollo (people.search) with pagination.",
+    summary: SearchInputDescription,
+    schema: SearchInputSchema,
+    parse: (value) => SearchInput.parse(value),
+    run: (input) => runApolloSearch(input as SearchInputType)
+  },
+  {
+    name: "apollo_enrich",
+    description: "Enrich a person by email / LinkedIn / Apollo ID (people.enrich).",
+    summary: EnrichInputDescription,
+    schema: EnrichInputSchema,
+    parse: (value) => EnrichInput.parse(value),
+    run: (input) => runApolloEnrich(input as EnrichInputType)
+  }
+];
+
+const TOOL_MAP = new Map<string, ToolDefinition<unknown>>(
+  TOOL_DEFINITIONS.map((tool) => [tool.name, tool])
+);
+
 /** ---------- Apollo helpers ---------- */
 const APOLLO = "https://api.apollo.io/v1";
 
@@ -215,20 +301,12 @@ const listTools = (_req: express.Request, res: express.Response) => {
     ok: true,
     service: "apollo-mcp",
     version: "1.0.0",
-    tools: [
-      {
-        name: "apollo_search",
-        description: "Search contacts in Apollo (people.search) with pagination.",
-        parameters: SearchInputDescription,
-        input_schema: SearchInputSchema
-      },
-      {
-        name: "apollo_enrich",
-        description: "Enrich a person by email / LinkedIn / Apollo ID (people.enrich).",
-        parameters: EnrichInputDescription,
-        input_schema: EnrichInputSchema
-      }
-    ]
+    tools: TOOL_DEFINITIONS.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.summary,
+      input_schema: tool.schema
+    }))
   });
 };
 
@@ -240,52 +318,123 @@ app.post("/tools/call", async (req, res) => {
   try {
     const { name, args } = req.body as { name: string; args: any };
 
-    if (name === "apollo_search") {
-      const input = SearchInput.parse(args);
-      const payload: any = {
-        // Apollo’s flexible search fields:
-        q_keywords: input.query,               // free text
-        title: input.title,
-        organization_name: input.company,
-        location: input.location,
-        seniority_levels: input.seniority_levels,
-        page: input.page,
-        per_page: input.per_page
-      };
-
-      const data = await apolloPost("/people/search", payload);
-      const list = (data.people || data.contacts || []).map(simplifyPerson);
-      const paging = data.pagination || {
-        page: input.page,
-        per_page: input.per_page,
-        total: data.total || list.length
-      };
-
-      return res.json({ ok: true, result: { count: list.length, paging, contacts: list } });
+    const tool = TOOL_MAP.get(name);
+    if (!tool) {
+      return res.status(400).json({ ok: false, error: `Unknown tool: ${name}` });
     }
-
-    if (name === "apollo_enrich") {
-      const input = EnrichInput.parse(args);
-      const payload: any = {};
-      if (input.email) payload.email = input.email;
-      if (input.linkedin_url) payload.linkedin_url = input.linkedin_url;
-      if (input.apollo_person_id) payload.id = input.apollo_person_id;
-
-      const data = await apolloPost("/people/enrich", payload);
-      const person = data.person || data;
-      return res.json({ ok: true, result: { contact: simplifyPerson(person), raw: data } });
-    }
-
-    return res.status(400).json({ ok: false, error: `Unknown tool: ${name}` });
+    const input = tool.parse(args);
+    const result = await tool.run(input);
+    return res.json({ ok: true, result });
   } catch (err: any) {
     return res.status(400).json({ ok: false, error: err.message || String(err) });
   }
 });
 
+/** ---------- JSON-RPC bridge for AgentKit ---------- */
+type JsonRpcId = string | number | null | undefined;
+interface JsonRpcRequest {
+  jsonrpc?: string;
+  method?: string;
+  params?: any;
+  id?: JsonRpcId;
+}
+
+const SERVER_INFO = { name: "apollo-mcp", version: "1.0.0" };
+
+function jsonRpcSuccess(id: JsonRpcId, result: unknown) {
+  return { jsonrpc: "2.0", id: id ?? null, result };
+}
+
+function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown) {
+  return { jsonrpc: "2.0", id: id ?? null, error: { code, message, data } };
+}
+
+async function handleJsonRpc(request: JsonRpcRequest) {
+  const { method, params, id } = request;
+  if (!method || typeof method !== "string") {
+    return jsonRpcError(id, -32600, "Invalid request");
+  }
+
+  if (method === "initialize") {
+    return jsonRpcSuccess(id, {
+      serverInfo: SERVER_INFO,
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {
+        tools: {
+          list: true,
+          call: true
+        }
+      }
+    });
+  }
+
+  if (method === "tools.list") {
+    return jsonRpcSuccess(id, {
+      tools: TOOL_DEFINITIONS.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.schema,
+        metadata: { summary: tool.summary }
+      }))
+    });
+  }
+
+  if (method === "tools.call") {
+    const toolName =
+      params?.name ||
+      params?.tool?.name ||
+      params?.identifier ||
+      params?.toolName;
+    const rawArgs = params?.arguments ?? params?.args ?? params?.toolInput ?? {};
+    if (typeof toolName !== "string") {
+      return jsonRpcError(id, -32602, "Missing tool name");
+    }
+    const tool = TOOL_MAP.get(toolName);
+    if (!tool) {
+      return jsonRpcError(id, -32601, `Unknown tool: ${toolName}`);
+    }
+    try {
+      const input = tool.parse(rawArgs);
+      const result = await tool.run(input);
+      return jsonRpcSuccess(id, {
+        content: [
+          {
+            type: "json",
+            json: {
+              tool: toolName,
+              result
+            }
+          }
+        ]
+      });
+    } catch (err: any) {
+      return jsonRpcError(
+        id,
+        -32602,
+        err?.message || "Invalid tool arguments",
+        err?.issues || err
+      );
+    }
+  }
+
+  return jsonRpcError(id, -32601, `Method not found: ${method}`);
+}
+
+app.post("/", async (req, res) => {
+  const body = req.body as JsonRpcRequest | undefined;
+  if (!body || typeof body !== "object") {
+    return res.status(400).json(jsonRpcError(null, -32600, "Invalid request body"));
+  }
+  try {
+    const response = await handleJsonRpc(body);
+    res.json(response);
+  } catch (err: any) {
+    res
+      .status(500)
+      .json(jsonRpcError(body.id, -32603, err?.message || "Internal error"));
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`apollo-mcp listening on :${PORT}`);
-});
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  next();
 });
