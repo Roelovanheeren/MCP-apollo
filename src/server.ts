@@ -14,6 +14,7 @@ if (!APOLLO_API_KEY || !MCP_AUTH_TOKEN) {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 // Simple auth for AgentKit → MCP (accepts Bearer or raw token/header)
 app.use((req, res, next) => {
