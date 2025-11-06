@@ -15,6 +15,28 @@ if (!APOLLO_API_KEY || !MCP_AUTH_TOKEN) {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use((req, _res, next) => {
+  const authPreview =
+    (req.headers.authorization as string | undefined) ||
+    (req.headers["x-api-key"] as string | undefined) ||
+    (req.query.access_token as string | undefined) ||
+    "";
+  let bodyPreview = "";
+  try {
+    bodyPreview =
+      typeof req.body === "string"
+        ? req.body.slice(0, 160)
+        : JSON.stringify(req.body).slice(0, 160);
+  } catch {
+    bodyPreview = "[unserializable]";
+  }
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.path} auth-preview=${
+      authPreview ? "***" : "none"
+    } body=${bodyPreview || "<empty>"}`
+  );
+  next();
+});
 
 // Simple auth for AgentKit → MCP (accepts Bearer or raw token/header)
 app.use((req, res, next) => {
